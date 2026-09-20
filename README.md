@@ -296,6 +296,14 @@ VectorIndex     ：暴力余弦 + std::partial_sort 取 top-k
 序列化成 JSON 后在 `web/index.html` 回放。`TraceRecorder::wrap()` 的设计使它可以**包裹**已有的
 TUI 回调而不侵入——TUI 照常工作，trace 同时落盘。
 
+**一个真实例子**：[`examples/traces/real_agent_run.json`](examples/traces/real_agent_run.json)
+是一次**失败**运行的完整记录——6 轮迭代、16 次工具调用后撞上迭代上限。打开它才看到三个
+终端输出里完全不可见的问题：LLM 用 PCRE 语法 `(?i)` 调 `std::regex` 导致工具报错；
+中文 pattern 经 GBK 编码变成乱码后**静默返回 0 结果**；以及循环检测对「语义级原地打转」
+完全失效。耗时分布也一并能读出来——75% 的时间花在 LLM 网络往返，不是本地引擎。
+
+案例的完整分析见 [`examples/traces/README.md`](examples/traces/README.md)。
+
 ---
 
 ## 七、诚实的边界
