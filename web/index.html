@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cpp-agent-runtime — Trace Viewer</title>
+<style>
+:root {
+    --color-think:   #06B6D4;
+    --color-act:     #EAB308;
+    --color-observe: #22C55E;
+    --color-result:  #F1F5F9;
+    --color-error:   #EF4444;
+    --color-bg:      #0F172A;
+    --color-surface: #1E293B;
+    --color-surface2:#334155;
+    --color-text:    #E2E8F0;
+    --color-text2:   #94A3B8;
+    --color-border:  #475569;
+    --color-accent:  #3B82F6;
+}
+/* Light theme (Day 22) */
+html.light {
+    --color-think:   #0891B2;
+    --color-act:     #CA8A04;
+    --color-observe: #16A34A;
+    --color-result:  #E2E8F0;
+    --color-error:   #DC2626;
+    --color-bg:      #F8FAFC;
+    --color-surface: #FFFFFF;
+    --color-surface2:#E2E8F0;
+    --color-text:    #0F172A;
+    --color-text2:   #64748B;
+    --color-border:  #CBD5E1;
+    --color-accent:  #2563EB;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--color-bg);
+    color: var(--color-text);
+    min-height: 100vh;
+    transition: background 0.2s, color 0.2s;
+}
+/* ── Header ─────────────────────────────── */
+header {
+    text-align: center; padding: 24px 16px 8px; position: relative;
+    border-bottom: 1px solid var(--color-border);
+}
+header h1 { font-size: 1.5rem; font-weight: 600; }
+header span { color: var(--color-text2); font-size: 0.85rem; }
+#theme-toggle {
+    position: absolute; right: 16px; top: 16px;
+    background: var(--color-surface); color: var(--color-text);
+    border: 1px solid var(--color-border); border-radius: 8px;
+    padding: 6px 12px; cursor: pointer; font-size: 0.9rem;
+}
+#theme-toggle:hover { border-color: var(--color-accent); }
+/* ── Trace selector (server mode) ───────── */
+#trace-bar {
+    display: none; max-width: 720px; margin: 12px auto 0;
+    padding: 0 16px; align-items: center; gap: 8px;
+}
+#trace-bar.visible { display: flex; }
+#trace-bar select {
+    flex: 1; background: var(--color-surface); color: var(--color-text);
+    border: 1px solid var(--color-border); border-radius: 8px;
+    padding: 8px; font-size: 0.9rem;
+}
+#trace-bar button {
+    background: var(--color-surface); color: var(--color-text);
+    border: 1px solid var(--color-border); border-radius: 8px;
+    padding: 8px 12px; cursor: pointer; font-size: 0.9rem;
+}
+#trace-bar button:hover { border-color: var(--color-accent); }
+#conn-dot { font-size: 0.7rem; color: var(--color-text2); }
+#conn-dot.live { color: var(--color-observe); }
+/* ── Drop zone ──────────────────────────── */
+#drop-zone {
+    margin: 16px auto; max-width: 720px;
+    border: 2px dashed var(--color-border); border-radius: 12px;
+    padding: 40px 16px; text-align: center; cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+}
+#drop-zone:hover, #drop-zone.drag-over {
+    border-color: var(--color-accent);
+    background: rgba(59,130,246,0.06);
+}
+#drop-zone p { color: var(--color-text2); font-size: 0.95rem; }
+#drop-zone .icon { font-size: 2rem; margin-bottom: 8px; }
+#error-msg { display: none; color: var(--color-error); margin-top: 8px; font-size: 0.85rem; }
+/* ── Dashboard ──────────────────────────── */
+#dashboard { display: none; max-width: 1200px; margin: 0 auto; padding: 16px; }
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 20px;
+}
+.stat-card {
+    background: var(--color-surface); border-radius: 10px;
+    padding: 16px; text-align: center;
+    border: 1px solid var(--color-border);
+}
+.stat-card .label { color: var(--color-text2); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-card .value { font-size: 1.6rem; font-weight: 700; margin-top: 4px; }
+.stat-card .sub { font-size: 0.75rem; color: var(--color-text2); margin-top: 2px; }
+/* ── Sections ───────────────────────────── */
+.section-title {
+    font-size: 1rem; font-weight: 600; margin: 24px 0 12px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--color-border);
+}
+/* ── Filter bar (Day 22) ────────────────── */
+#filter-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin-bottom: 12px;
+}
+#filter-bar input {
+    flex: 1; min-width: 160px; background: var(--color-surface);
+    color: var(--color-text); border: 1px solid var(--color-border);
+    border-radius: 8px; padding: 8px; font-size: 0.9rem;
+}
+.phase-chip {
+    padding: 5px 12px; border-radius: 14px; cursor: pointer;
+    font-size: 0.78rem; font-weight: 600; border: 1px solid var(--color-border);
+    color: var(--color-text2); background: var(--color-surface);
+    user-select: none;
+}
+.phase-chip.on { color: #000; }
+.phase-chip.think.on  { background: var(--color-think);   border-color: var(--color-think); }
+.phase-chip.act.on    { background: var(--color-act);     border-color: var(--color-act); }
+.phase-chip.observe.on{ background: var(--color-observe); border-color: var(--color-observe); }
+#filter-count { color: var(--color-text2); font-size: 0.78rem; }
+/* ── Timeline ───────────────────────────── */
+#timeline { margin-bottom: 16px; }
+.iter-row {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 8px;
+}
+.iter-label {
+    min-width: 52px; font-size: 0.82rem;
+    color: var(--color-text2); text-align: right;
+}
+.iter-bar {
+    flex: 1; height: 32px; background: var(--color-surface);
+    border-radius: 6px; overflow: hidden; display: flex;
+    position: relative; cursor: pointer;
+}
+.phase-block {
+    height: 100%; display: flex; align-items: center;
+    justify-content: center; font-size: 0.72rem; font-weight: 600;
+    transition: filter 0.15s; position: relative;
+    min-width: 4px;
+}
+.phase-block:hover { filter: brightness(1.2); }
+.phase-block.selected { outline: 2px solid #fff; outline-offset: -2px; }
+.phase-think  { background: var(--color-think);   color: #000; }
+.phase-act    { background: var(--color-act);     color: #000; }
+.phase-observe{ background: var(--color-observe); color: #000; }
+.phase-result { background: var(--color-result);  color: #000; }
+.phase-label {
+    overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; padding: 0 6px;
+}
+/* ── Detail panel ───────────────────────── */
+#detail-panel {
+    display: none; background: var(--color-surface);
+    border: 1px solid var(--color-border); border-radius: 10px;
+    padding: 20px; margin-bottom: 20px;
+}
+#detail-panel h3 { margin-bottom: 12px; font-size: 1rem; }
+.detail-grid {
+    display: grid; grid-template-columns: 120px 1fr;
+    gap: 8px 16px; font-size: 0.88rem;
+}
+.detail-grid .key { color: var(--color-text2); }
+.detail-grid .val { word-break: break-word; }
+.code-block {
+    background: #0c1222; border: 1px solid var(--color-border);
+    border-radius: 6px; padding: 12px; margin-top: 12px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.82rem; line-height: 1.5;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+    max-height: 300px; overflow-y: auto;
+}
+html.light .code-block { background: #0F172A; color: #E2E8F0; }
+.badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 0.72rem; font-weight: 600;
+}
+.badge-ok  { background: #166534; color: #86EFAC; }
+.badge-err { background: #7F1D1D; color: #FCA5A5; }
+/* ── Token chart ────────────────────────── */
+.token-chart { margin-bottom: 16px; }
+.token-row {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 6px;
+}
+.token-label { min-width: 52px; font-size: 0.78rem; color: var(--color-text2); text-align: right; }
+.token-bar-wrap { flex: 1; height: 22px; background: var(--color-surface2); border-radius: 4px; overflow: hidden; display: flex; }
+.token-bar-in  { background: var(--color-accent); height: 100%; }
+.token-bar-out { background: var(--color-think); height: 100%; }
+.token-num { min-width: 56px; font-size: 0.78rem; text-align: right; color: var(--color-text2); }
+/* ── Answer ─────────────────────────────── */
+.answer-box {
+    background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: 10px; padding: 16px; margin-top: 12px;
+    font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap;
+}
+.answer-box .label { color: var(--color-text2); font-size: 0.78rem; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+/* ── Keyboard hint ──────────────────────── */
+#kbd-hint {
+    text-align: center; color: var(--color-text2); font-size: 0.72rem;
+    margin: 4px 0 16px;
+}
+#kbd-hint kbd {
+    background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: 4px; padding: 1px 5px; font-family: monospace;
+}
+/* ── Footer ─────────────────────────────── */
+footer { text-align: center; padding: 24px; color: var(--color-text2); font-size: 0.75rem; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>&#x1F9E0; cpp-agent-runtime <span>— Trace Viewer</span></h1>
+    <button id="theme-toggle" title="Toggle light/dark">&#x1F319; Theme</button>
+</header>
+
+<div id="trace-bar">
+    <select id="trace-select"></select>
+    <button id="refresh-btn" title="Refresh trace list">&#x21BB;</button>
+    <span id="conn-dot" title="Server connection">&#x25CF;</span>
+</div>
+
+<div id="drop-zone">
+    <div class="icon">&#x1F4C2;</div>
+    <p>Drop a trace JSON file here, or click to browse</p>
+    <p style="font-size:0.78rem;margin-top:4px;">File → Open... or drag a <code>.json</code> file onto this zone</p>
+    <div id="error-msg"></div>
+</div>
+<input type="file" id="file-input" accept=".json" style="display:none">
+
+<div id="dashboard">
+    <!-- Stats -->
+    <div class="stats-grid" id="stats"></div>
+
+    <!-- Final Answer -->
+    <div id="answer-section" style="display:none">
+        <div class="section-title">&#x1F4AC; Final Answer</div>
+        <div class="answer-box">
+            <div class="label">Agent Response</div>
+            <div id="answer-text"></div>
+        </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="section-title">&#x23F1; Reasoning Timeline <span style="font-weight:400;color:var(--color-text2);font-size:0.82rem;">(click a block for details)</span></div>
+    <div id="filter-bar">
+        <input id="filter-input" type="text" placeholder="Filter by keyword / tool / content…">
+        <span class="phase-chip think on"   data-phase="THINK">THINK</span>
+        <span class="phase-chip act on"     data-phase="ACT">ACT</span>
+        <span class="phase-chip observe on" data-phase="OBSERVE">OBSERVE</span>
+        <span id="filter-count"></span>
+    </div>
+    <div id="timeline"></div>
+
+    <!-- Detail panel -->
+    <div id="detail-panel">
+        <h3 id="detail-title"></h3>
+        <div class="detail-grid" id="detail-grid"></div>
+        <div id="detail-extra"></div>
+    </div>
+
+    <!-- Token chart -->
+    <div class="section-title">&#x1F4CA; Token Usage by Iteration</div>
+    <div class="token-chart" id="token-chart"></div>
+</div>
+
+<div id="kbd-hint">
+    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step &middot;
+    <kbd>Space</kbd> detail &middot;
+    <kbd>Esc</kbd> close
+</div>
+
+<footer>cpp-agent-runtime trace viewer &middot; Day 21-22</footer>
+
+<script>
+// ── DOM refs ────────────────────────────────────────────────────────
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const errorMsg  = document.getElementById('error-msg');
+const dashboard = document.getElementById('dashboard');
+const traceBar  = document.getElementById('trace-bar');
+const traceSel  = document.getElementById('trace-select');
+const refreshBtn= document.getElementById('refresh-btn');
+const connDot   = document.getElementById('conn-dot');
+const filterInput = document.getElementById('filter-input');
+
+// ── State ───────────────────────────────────────────────────────────
+let _allSteps = [];
+let _currentStep = -1;          // index into _allSteps (Day 22 keyboard nav)
+let _currentData = null;
+const isServerMode = location.protocol === 'http:' || location.protocol === 'https:';
+const LS_THEME = 'cpp-agent-theme';
+const LS_TRACE = 'cpp-agent-last-trace';
+
+// ── Theme (Day 22) ──────────────────────────────────────────────────
+function applyTheme(light) {
+    document.documentElement.classList.toggle('light', light);
+    document.getElementById('theme-toggle').textContent = light ? '☀️ Theme' : '🌙 Theme';
+    localStorage.setItem(LS_THEME, light ? 'light' : 'dark');
+}
+document.getElementById('theme-toggle').addEventListener('click', () => {
+    applyTheme(!document.documentElement.classList.contains('light'));
+});
+applyTheme(localStorage.getItem(LS_THEME) === 'light');
+
+// ── File loading ─────────────────────────────────────────────────────
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) loadFile(file);
+});
+
+function loadFile(file) {
+    errorMsg.style.display = 'none';
+    const reader = new FileReader();
+    reader.onload = () => {
+        try {
+            const data = JSON.parse(reader.result);
+            if (!data.version || !data.steps) throw new Error('Missing "version" or "steps" field');
+            localStorage.setItem(LS_TRACE, file.name);
+            render(data);
+        } catch (err) {
+            errorMsg.textContent = 'Error: ' + (err.message || 'Invalid JSON file');
+            errorMsg.style.display = 'block';
+        }
+    };
+    reader.readAsText(file);
+}
+
+// ── Server mode (Day 22) ────────────────────────────────────────────
+async function loadTraceList() {
+    try {
+        const res = await fetch('/api/traces');
+        const data = await res.json();
+        const names = data.traces.map(t => t.name);
+        traceSel.innerHTML = names.map(n =>
+            `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+            || '<option value="">(no traces yet — run a demo)</option>';
+        return names;
+    } catch {
+        return [];
+    }
+}
+
+async function loadTraceFromServer(name) {
+    if (!name) return;
+    try {
+        const res = await fetch('/api/trace/' + encodeURIComponent(name));
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!data.version || !data.steps) throw new Error('Missing "version" or "steps" field');
+        localStorage.setItem(LS_TRACE, name);
+        render(data);
+    } catch (err) {
+        errorMsg.textContent = 'Error loading trace: ' + (err.message || '');
+        errorMsg.style.display = 'block';
+    }
+}
+
+function connectSSE() {
+    if (!isServerMode) return;
+    const es = new EventSource('/api/events');
+    es.onopen  = () => connDot.classList.add('live');
+    es.onerror = () => connDot.classList.remove('live');
+    es.onmessage = async (e) => {
+        try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'changed') {
+                await loadTraceList();
+                if (msg.newest) loadTraceFromServer(msg.newest);
+            }
+        } catch {}
+    };
+}
+
+if (isServerMode) {
+    traceBar.classList.add('visible');
+    refreshBtn.addEventListener('click', loadTraceList);
+    traceSel.addEventListener('change', () => loadTraceFromServer(traceSel.value));
+    (async () => {
+        const names = await loadTraceList();
+        const last = localStorage.getItem(LS_TRACE);
+        if (last && names.includes(last)) {
+            traceSel.value = last;
+            loadTraceFromServer(last);
+        } else if (names.length) {
+            loadTraceFromServer(names[0]);  // newest first
+        }
+    })();
+    connectSSE();
+} else {
+    dropZone.style.display = 'block';
+}
+
+// ── Render ───────────────────────────────────────────────────────────
+function render(data) {
+    _currentData = data;
+    _currentStep = -1;
+    renderStats(data.summary);
+    renderAnswer(data.summary?.final_answer);
+    renderTokenChart(data.steps);   // sets _allSteps before applyFilters()
+    dropZone.style.display = 'none';
+    dashboard.style.display = 'block';
+    document.getElementById('detail-panel').style.display = 'none';
+    applyFilters();
+}
+
+// ── Stats ────────────────────────────────────────────────────────────
+function renderStats(s) {
+    if (!s) return;
+    const cards = [
+        ['📊 Iterations',   s.total_iterations ?? 0, ''],
+        ['🔢 Total Tokens', fmtNum(s.total_tokens ?? 0),
+         `In: ${fmtNum(s.total_prompt_tokens??0)} / Out: ${fmtNum(s.total_completion_tokens??0)}`],
+        ['🔧 Tool Calls',   `${s.total_tool_successes??0}/${s.total_tool_calls??0} ✓`,
+         `${s.total_tool_failures??0} failed`],
+        ['⏱ Elapsed',      fmtMs(s.elapsed_ms ?? 0),
+         `${s.total_steps??0} steps, ${s.total_llm_calls??0} LLM calls`],
+    ];
+    document.getElementById('stats').innerHTML = cards.map(([l,v,sub]) =>
+        `<div class="stat-card"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`
+    ).join('');
+}
+
+// ── Answer ───────────────────────────────────────────────────────────
+function renderAnswer(text) {
+    if (!text || text.trim().length === 0) return;
+    const sec = document.getElementById('answer-section');
+    sec.style.display = 'block';
+    document.getElementById('answer-text').textContent = text;
+}
+
+// ── Filtering (Day 22) ──────────────────────────────────────────────
+const phaseFilter = { THINK: true, ACT: true, OBSERVE: true };
+
+document.querySelectorAll('.phase-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+        const p = chip.dataset.phase;
+        phaseFilter[p] = !phaseFilter[p];
+        chip.classList.toggle('on', phaseFilter[p]);
+        applyFilters();
+    });
+});
+filterInput.addEventListener('input', applyFilters);
+
+function stepMatches(s, kw) {
+    if (!phaseFilter[s.phase]) return false;
+    if (!kw) return true;
+    const hay = [
+        s.detail, s.llm_content,
+        ...(s.tool_calls || []).map(t => t.function_name + ' ' + (t.arguments || '')),
+        ...(s.tool_results || []).map(r => r.name + ' ' + (r.content || '')),
+    ].join('\n').toLowerCase();
+    return hay.includes(kw.toLowerCase());
+}
+
+function applyFilters() {
+    if (!_currentData) return;
+    const kw = filterInput.value.trim();
+    const visible = _allSteps.filter(s => stepMatches(s, kw));
+    document.getElementById('filter-count').textContent =
+        `${visible.length}/${_allSteps.length} steps`;
+
+    const container = document.getElementById('timeline');
+    if (visible.length === 0) {
+        container.innerHTML = '<p style="color:var(--color-text2)">No steps match the filter.</p>';
+        return;
+    }
+
+    // Re-render timeline using only visible steps (keeps max-ms scale).
+    const groups = new Map();
+    let maxIter = 0;
+    for (const s of visible) {
+        const i = s.iteration ?? 0;
+        if (i > maxIter) maxIter = i;
+        if (!groups.has(i)) groups.set(i, []);
+        groups.get(i).push(s);
+    }
+    let maxMs = 1;
+    for (const s of visible) if ((s.elapsed_ms ?? 0) > maxMs) maxMs = s.elapsed_ms;
+
+    let html = '';
+    for (let iter = 0; iter <= maxIter; iter++) {
+        const group = groups.get(iter);
+        if (!group) continue;
+        html += '<div class="iter-row">';
+        html += `<div class="iter-label">Iter ${iter}</div>`;
+        html += '<div class="iter-bar">';
+        for (const s of group) {
+            html += phaseBlockHTML(s, maxMs);
+        }
+        html += '</div></div>';
+    }
+    container.innerHTML = html;
+}
+
+function phaseBlockHTML(s, maxMs) {
+    const phaseName = s.phase || 'UNKNOWN';
+    const phaseLower = phaseName.toLowerCase();
+    const w = Math.max(2, ((s.elapsed_ms ?? 10) / maxMs) * 100);
+    const label = phaseName === 'THINK'
+        ? (s.llm_content || '').substring(0, 30)
+        : phaseName === 'ACT'
+            ? (s.tool_calls || []).map(t => t.function_name).join(', ')
+            : phaseName === 'OBSERVE'
+                ? `${s.tool_results?.length || 0} result(s)`
+                : '';
+    const title = `[${phaseName}] ${s.detail || ''} (${fmtMs(s.elapsed_ms)})`;
+    const idx = _allSteps.indexOf(s);
+    const sel = idx === _currentStep ? ' selected' : '';
+    return `<div class="phase-block phase-${phaseLower}${sel}"
+                 style="width:${w}%"
+                 title="${esc(title)}"
+                 data-step-index="${idx}"
+                 onclick="showDetail(${idx})">
+            <span class="phase-label">${esc(label)}</span>
+            </div>`;
+}
+
+// ── Detail panel ─────────────────────────────────────────────────────
+function findStepByIndex(index) {
+    if (index >= 0 && index < _allSteps.length && _allSteps[index] &&
+        (_allSteps[index].index === index || _allSteps[index].index == null))
+        return _allSteps[index];
+    return _allSteps.find(s => s.index === index) || _allSteps[index];
+}
+
+function showDetail(index) {
+    const s = findStepByIndex(index);
+    if (!s) return;
+    _currentStep = _allSteps.indexOf(s);
+    applyFilters();  // refresh selection highlight
+
+    const panel = document.getElementById('detail-panel');
+    panel.style.display = 'block';
+    document.getElementById('detail-title').textContent =
+        `Step #${s.index ?? index} — Iter ${s.iteration} — ${s.phase} (${fmtMs(s.elapsed_ms)})`;
+
+    let grid = '';
+    grid += row('Phase', s.phase);
+    grid += row('Iteration', s.iteration);
+    grid += row('Elapsed', fmtMs(s.elapsed_ms));
+    grid += row('Detail', s.detail || '');
+    document.getElementById('detail-grid').innerHTML = grid;
+
+    let extra = '';
+
+    if (s.llm_content && s.llm_content.trim()) {
+        extra += `<div class="code-block">${esc(s.llm_content)}</div>`;
+    }
+
+    if (s.llm_response && s.llm_response !== null) {
+        const lr = s.llm_response;
+        extra += `<div style="margin-top:12px;font-size:0.85rem;color:var(--color-text2)">`;
+        extra += `Model: ${esc(lr.model || '?')} &middot; `;
+        extra += `Tokens: ${lr.prompt_tokens||0} prompt + ${lr.completion_tokens||0} compl = ${lr.total_tokens||0} total &middot; `;
+        extra += `Finish: ${esc(lr.finish_reason || '?')}`;
+        extra += `</div>`;
+    }
+
+    if (s.tool_calls && s.tool_calls.length > 0) {
+        extra += '<div style="margin-top:12px;font-weight:600;font-size:0.88rem;">🔧 Tool Calls</div>';
+        for (const tc of s.tool_calls) {
+            let argsStr = '';
+            try { argsStr = JSON.stringify(JSON.parse(tc.arguments || '{}'), null, 2); }
+            catch { argsStr = tc.arguments || ''; }
+            extra += `<div class="code-block"><strong>${esc(tc.function_name)}</strong>(${esc(argsStr)})</div>`;
+        }
+    }
+
+    if (s.tool_results && s.tool_results.length > 0) {
+        extra += '<div style="margin-top:12px;font-weight:600;font-size:0.88rem;">📋 Tool Results</div>';
+        for (const tr of s.tool_results) {
+            const badge = tr.success
+                ? '<span class="badge badge-ok">OK</span>'
+                : '<span class="badge badge-err">ERROR</span>';
+            extra += `<div style="margin-top:8px;">${badge} <strong>${esc(tr.name)}</strong></div>`;
+            if (tr.content) {
+                extra += `<div class="code-block">${esc(tr.content)}</div>`;
+            }
+        }
+    }
+
+    document.getElementById('detail-extra').innerHTML = extra;
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function row(k, v) { return `<div class="key">${k}</div><div class="val">${v ?? ''}</div>`; }
+
+// ── Keyboard navigation (Day 22) ────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+    if (!_currentData) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+
+    if (e.key === 'ArrowRight' && _currentStep < _allSteps.length - 1) {
+        e.preventDefault(); showDetail(_currentStep + 1);
+    } else if (e.key === 'ArrowLeft' && _currentStep > 0) {
+        e.preventDefault(); showDetail(_currentStep - 1);
+    } else if (e.key === ' ') {
+        e.preventDefault();
+        const panel = document.getElementById('detail-panel');
+        if (panel.style.display === 'none' && _currentStep >= 0) {
+            showDetail(_currentStep);
+        } else {
+            panel.style.display = 'none';
+        }
+    } else if (e.key === 'Escape') {
+        document.getElementById('detail-panel').style.display = 'none';
+    }
+});
+
+// ── Token chart ──────────────────────────────────────────────────────
+function renderTokenChart(steps) {
+    _allSteps = steps;
+
+    const iterTokens = new Map();
+    let maxT = 1;
+    for (const s of steps) {
+        if (!s.llm_response) continue;
+        const i = s.iteration ?? 0;
+        if (!iterTokens.has(i)) iterTokens.set(i, { prompt: 0, compl: 0, total: 0 });
+        const t = iterTokens.get(i);
+        t.prompt += s.llm_response.prompt_tokens || 0;
+        t.compl  += s.llm_response.completion_tokens || 0;
+        t.total  += s.llm_response.total_tokens || 0;
+        if (t.total > maxT) maxT = t.total;
+    }
+
+    if (iterTokens.size === 0) {
+        document.getElementById('token-chart').innerHTML =
+            '<p style="color:var(--color-text2)">No token data available.</p>';
+        return;
+    }
+
+    let html = '';
+    const sortedIters = [...iterTokens.entries()].sort((a,b) => a[0] - b[0]);
+    for (const [iter, t] of sortedIters) {
+        const pct = (t.total / maxT) * 100;
+        const inPct  = t.total > 0 ? (t.prompt / t.total) * 100 : 0;
+        const outPct = t.total > 0 ? (t.compl  / t.total) * 100 : 0;
+        html += '<div class="token-row">';
+        html += `<div class="token-label">Iter ${iter}</div>`;
+        html += `<div class="token-bar-wrap" style="width:${pct}%">`;
+        html += `<div class="token-bar-in" style="width:${inPct}%" title="Prompt: ${fmtNum(t.prompt)}"></div>`;
+        html += `<div class="token-bar-out" style="width:${outPct}%" title="Completion: ${fmtNum(t.compl)}"></div>`;
+        html += '</div>';
+        html += `<div class="token-num">${fmtNum(t.total)}</div>`;
+        html += '</div>';
+    }
+    document.getElementById('token-chart').innerHTML = html;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+function fmtNum(n) { return n != null ? n.toLocaleString() : '0'; }
+function fmtMs(ms) {
+    if (ms == null) return '—';
+    if (ms < 1) return (ms * 1000).toFixed(0) + 'µs';
+    if (ms < 1000) return ms.toFixed(1) + 'ms';
+    return (ms / 1000).toFixed(2) + 's';
+}
+function esc(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+</body>
+</html>
