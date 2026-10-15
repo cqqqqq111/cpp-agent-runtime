@@ -87,6 +87,10 @@ private:
 // ============================================================================
 
 inline void VectorIndex::add(std::vector<float> vec, std::string metadata) {
+    if (vec.empty() || (!entries_.empty() && vec.size() != dim_))
+        throw std::invalid_argument("VectorIndex: invalid vector dimension");
+    if (!std::all_of(vec.begin(), vec.end(), [](float v) { return std::isfinite(v); }))
+        throw std::invalid_argument("VectorIndex: non-finite vector value");
     if (entries_.empty()) {
         dim_ = vec.size();
     }
@@ -96,6 +100,10 @@ inline void VectorIndex::add(std::vector<float> vec, std::string metadata) {
 inline std::vector<VectorIndex::SearchResult> VectorIndex::search(
     const std::vector<float>& query, size_t k) const {
     if (entries_.empty() || k == 0) return {};
+    if (query.size() != dim_)
+        throw std::invalid_argument("VectorIndex: query dimension mismatch");
+    if (!std::all_of(query.begin(), query.end(), [](float v) { return std::isfinite(v); }))
+        throw std::invalid_argument("VectorIndex: non-finite query value");
 
     // Compute similarity for all entries
     std::vector<SearchResult> results;
@@ -152,14 +160,18 @@ inline void VectorIndex::load(const std::string& path) {
     }
     nlohmann::json j = nlohmann::json::parse(f);
 
-    clear();
-    dim_ = j.value("dim", size_t(0));
+    VectorIndex loaded;
+    size_t dimension = j.at("dim").get<size_t>();
     for (const auto& e : j.at("entries")) {
-        entries_.push_back(Entry{
-            e.at("vector").get<std::vector<float>>(),
-            e.at("metadata").get<std::string>(),
-        });
+        auto vector = e.at("vector").get<std::vector<float>>();
+        if (vector.size() != dimension)
+            throw std::invalid_argument("VectorIndex: stored dimension mismatch");
+        loaded.add(std::move(vector), e.at("metadata").get<std::string>());
     }
+    if (loaded.entries_.empty() && dimension != 0)
+        throw std::invalid_argument("VectorIndex: nonzero dimension for empty index");
+    entries_.swap(loaded.entries_);
+    dim_ = loaded.dim_;
 }
 
 inline float VectorIndex::cosine_similarity(

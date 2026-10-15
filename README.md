@@ -99,6 +99,44 @@ cpp-agent-runtime/
 
 ## 四、构建 & 运行
 
+### WSL/Linux 快速开始（含离线验证）
+
+需要 C++20 编译器、Python 3 的开发头文件和库。首次配置会从 GitHub 下载 fmt/spdlog。
+
+LLM 请求现在复用 HTTP 客户端及其事件循环，默认最多 4 个并发传输会话，可用
+`LLM_MAX_SESSIONS=1..32` 配置。保持无自动重试；排队等待也计入请求超时。
+连接复用的本地对照及生命周期约束见 [PERFORMANCE.md](PERFORMANCE.md)。
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install cmake pybind11 openai
+
+cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug \
+  -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+cmake --build build/debug -j 4
+ctest --test-dir build/debug --output-on-failure --timeout 30
+
+# 无需 API Key：真实 ReAct 循环 + echo 工具 + trace，模型响应为预设脚本。
+./build/debug/cpp-agent --offline --trace logs/offline.json
+./build/debug/demos/code_review_demo
+
+# 终端界面也可显式选择离线模式。
+./build/debug/cpp-agent --offline --tui
+```
+
+测试中的 `python-bridge` 启动本地 HTTP/SSE 模拟服务，验证 C++ → Python SDK →
+工具调用、流式响应及请求超时，不调用远端模型。测试断言在 Debug/Release 中均启用。
+真实模型需要配置 `OPENAI_API_KEY`，可选 `OPENAI_BASE_URL` 和 `LLM_MODEL`；缺少凭据时
+默认入口返回非零状态并提示使用 `--offline`。
+
+当前子进程执行会捕获 stdout/stderr、返回真实退出状态，并在超时后终止进程组/Job。
+它不是操作系统安全沙箱。模型的 `iteration_timeout_ms` 由适配器的传输层取消请求；
+自定义适配器如需支持正数超时，必须实现 `set_request_timeout()`，否则会明确拒绝。
+设置为 0 关闭总请求期限，Python SDK 仍有 60 秒的 IO 超时。
+
+本次修复与验证结果见 [BUILD_REVIEW.md](BUILD_REVIEW.md)。下方性能表为原有环境的历史记录。
+
 **依赖**
 
 - C++20 编译器（GCC ≥ 10 / Clang ≥ 14 / MSVC 2022+；GCC < 14 需 `-fcoroutines`，CMake 已自动处理）
@@ -117,7 +155,8 @@ cmake --build build -j
 ```bash
 export OPENAI_API_KEY="sk-..."       # 或兼容端点
 
-./build/cpp-agent                    # 默认交互模式
+./build/cpp-agent                    # 真实模型桥接 smoke test
+./build/cpp-agent --offline          # 无 API Key 的离线工具调用演示
 ./build/cpp-agent --tui              # TUI 模式（流式打字机效果）
 ./build/cpp-agent --trace out.json   # 带 trace 记录
 ```
@@ -333,6 +372,7 @@ TUI 回调而不侵入——TUI 照常工作，trace 同时落盘。
 
 | 文档 | 内容 |
 |------|------|
+| [PERFORMANCE.md](PERFORMANCE.md) | 逐请求/逐工具性能观测、P50/P95 汇总与可重复基线 |
 | [benchmarks/README.md](benchmarks/README.md) | benchmark 完整记录与测量说明 |
 | [benchmarks/COMPARISON_CXX_VS_PYTHON.md](benchmarks/COMPARISON_CXX_VS_PYTHON.md) | C++ vs Python 同机对比报告 |
 

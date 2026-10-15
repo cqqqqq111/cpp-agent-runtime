@@ -54,7 +54,13 @@ public:
 
     /// Load the index from disk (Day 22). Replaces current contents.
     /// @throws std::runtime_error on IO/parse error.
-    void load(const std::string& path) { index_.load(path); }
+    void load(const std::string& path) {
+        VectorIndex loaded;
+        loaded.load(path);
+        if (loaded.size() && loaded.dimension() != dim_)
+            throw std::invalid_argument("LongTermMemory: stored embedding dimension mismatch");
+        index_ = std::move(loaded);
+    }
 
 private:
     VectorIndex index_;
@@ -72,6 +78,7 @@ inline LongTermMemory::LongTermMemory(EmbeddingFn embed_fn, size_t dim)
 inline void LongTermMemory::remember(const std::string& text) {
     if (!embed_) return;
     auto vec = embed_(text);
+    if (vec.size() != dim_) throw std::invalid_argument("LongTermMemory: embedding dimension mismatch");
     index_.add(std::move(vec), text);
 }
 
@@ -79,6 +86,7 @@ inline std::vector<VectorIndex::SearchResult> LongTermMemory::recall(
     const std::string& query, size_t k) {
     if (!embed_) return {};
     auto qvec = embed_(query);
+    if (qvec.size() != dim_) throw std::invalid_argument("LongTermMemory: embedding dimension mismatch");
     return index_.search(qvec, k);
 }
 

@@ -5,8 +5,11 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,15 +43,14 @@ public:
         r.total_tokens = 10;
         return r;
     }
-    LLMResponse chat_full(const std::vector<Message>& msgs, const json& tools) override {
+    LLMResponse chat_full(const std::vector<Message>&, const json& tools) override {
         LLMResponse r;
         // If tools are available, occasionally return a tool call
         if (!tools.empty() && tools.is_array() && tools.size() > 0 && call_count_++ == 0) {
-            std::string tool_name = tools[0]["function"]["name"];
             r.has_tool_calls = true;
             ToolCall tc;
             tc.id = "demo_1";
-            tc.function_name = tool_name;
+            tc.function_name = "echo";
             tc.arguments = R"({"message": "hello from TUI"})";
             r.tool_calls = {tc};
             r.finish_reason = "tool_calls";
@@ -78,16 +80,66 @@ int main(int argc, char* argv[]) {
     spdlog::set_default_logger(logger);
 
     // ── Parse args ────────────────────────────────────────────────────────
+    struct BridgeCleanup { ~BridgeCleanup() { shutdown_python_bridge(); } } bridge_cleanup;
     bool tui_mode = false;
+    bool offline = false;
+    bool streaming = false;
+    std::string tool_root = ".";
+    std::string tool_names = "echo,filesystem,grep";
+    bool tools_selected = false;
+    std::string query = "Verify the agent tool pipeline.";
     std::string trace_file;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--tui") == 0) tui_mode = true;
+        else if (std::strcmp(argv[i], "--offline") == 0) offline = true;
+        else if (std::strcmp(argv[i], "--stream") == 0) streaming = true;
+        else if (std::strcmp(argv[i], "--tools") == 0) {
+            if (i + 1 >= argc) { fmt::print(stderr, "--tools requires a comma-separated list\n"); return 1; }
+            tool_names = argv[++i];
+            tools_selected = true;
+        }
+        else if (std::strcmp(argv[i], "--tool-root") == 0 && i + 1 < argc) tool_root = argv[++i];
+        else if (std::strcmp(argv[i], "--query") == 0 && i + 1 < argc) query = argv[++i];
         else if (std::strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
             trace_file = argv[++i];
         }
     }
 
+    std::set<std::string> selected_tools;
+    std::istringstream tool_list(tool_names);
+    std::string tool_name;
+    while (std::getline(tool_list, tool_name, ',')) {
+        if (tool_name != "echo" && tool_name != "filesystem" && tool_name != "grep") {
+            fmt::print(stderr, "Unknown tool: {}\n", tool_name);
+            return 1;
+        }
+        selected_tools.insert(tool_name);
+    }
+    if (selected_tools.empty() || tool_names.back() == ',') {
+        fmt::print(stderr, "--tools must name at least one tool\n"); return 1;
+    }
+    if (tools_selected && (offline || tui_mode)) {
+        fmt::print(stderr, "--tools is supported in headless real-agent mode only\n"); return 1;
+    }
     // ── TUI Mode ──────────────────────────────────────────────────────────
+    if (offline && !tui_mode) {
+        DemoLLM llm;
+        ToolRegistry registry;
+        registry.register_tool(std::make_unique<EchoTool>());
+        AgentConfig config;
+        ReActLoop agent(llm, registry, config);
+        TraceRecorder recorder(trace_file);
+        recorder.set_config(config);
+        recorder.set_query(query);
+        agent.set_trace_callback(recorder.wrap({}));
+        auto started = std::chrono::steady_clock::now();
+        auto answer = agent.run(query);
+        recorder.finalize(agent.last_run_iterations(), agent.last_run_tokens(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(), answer);
+        recorder.save_to_file();
+        fmt::print("Offline mode (scripted LLM, real echo tool)\n{}\n", answer);
+        return 0;
+    }
     if (tui_mode) {
         fmt::print("Starting cpp-agent-runtime TUI mode...\n");
 
@@ -107,7 +159,7 @@ int main(int argc, char* argv[]) {
         // The .env file is loaded on the Python side, so we ask Python whether
         // a key is present rather than reading process env vars directly.
         std::unique_ptr<LLMAdapter> llm;
-        if (init_python_bridge() == 0) {
+        if (!offline && init_python_bridge() == 0) {
             try {
                 json cfg = json::parse(llm_config_bridge());
                 if (cfg.value("configured", false)) {
@@ -152,6 +204,8 @@ int main(int argc, char* argv[]) {
 
         auto tui_cb = [&](const TraceStep& ts) {
             switch (ts.phase) {
+                case TraceStep::Phase::FINISH:
+                    break;
                 case TraceStep::Phase::THINK:
                     // In streaming mode the typewriter (append_to_last) paints
                     // the final text, so here we only surface tool-call intents.
@@ -234,7 +288,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // ── Legacy Mode (smoke test) ──────────────────────────────────────────
+    // ── Headless real agent ──────────────────────────────────────────────
     fmt::print(R"(
 ╔══════════════════════════════════════════════════════════════╗
 ║              cpp-agent-runtime  v0.1.0                       ║
@@ -249,18 +303,43 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     spdlog::info("Python bridge OK.");
-
-    spdlog::info("Running LLM smoke test...");
-    try {
-        std::string response = call_llm_bridge(
-            "Reply with exactly: 'cpp-agent-runtime bridge is working!'");
-        fmt::print("\n  🤖 LLM Response:\n  {}\n\n", response);
-        spdlog::info("Smoke test passed.");
-    } catch (const std::exception& e) {
-        spdlog::error("Smoke test failed: {}", e.what());
+    if (!json::parse(llm_config_bridge()).value("configured", false)) {
+        fmt::print(stderr, "No API key configured. Use --offline to run the local agent demo, "
+                           "or configure OPENAI_API_KEY for a real model.\n");
+        return 1;
     }
 
-    shutdown_python_bridge();
-    spdlog::info("Shut down cleanly.");
-    return 0;
+    try {
+        AgentConfig config;
+        config.model = json::parse(llm_config_bridge()).value("model", config.model);
+        config.system_prompt = "You are a coding assistant. Use the read-only tools to inspect code "
+            "when requested. Tool paths are relative to the configured tool root. Answer concisely.";
+        config.max_iterations = 4;
+        config.iteration_timeout_ms = 60000;
+        auto llm = make_python_llm_adapter(config.model);
+        ToolRegistry registry;
+        if (selected_tools.contains("echo")) registry.register_tool(std::make_unique<EchoTool>());
+        if (selected_tools.contains("filesystem")) registry.register_tool(std::make_unique<FileSystemTool>(tool_root));
+        if (selected_tools.contains("grep")) registry.register_tool(std::make_unique<GrepTool>(tool_root));
+        ReActLoop agent(*llm, registry, config);
+        TraceRecorder recorder(trace_file);
+        recorder.set_config(config);
+        recorder.set_query(query);
+        agent.set_trace_callback(recorder.wrap({}));
+        fmt::print("LLM backend: {}\n", llm->name());
+        auto answer = streaming ? agent.run_streaming(query, [](const std::string& text) {
+            fmt::print("{}", text);
+            std::fflush(stdout);
+        }) : agent.run(query);
+        if (!streaming) fmt::print("{}", answer);
+        fmt::print("\n");
+        if (!recorder.save_to_file()) return 1;
+        const auto& metrics = agent.last_run_metrics();
+        fmt::print("Status: {} | LLM calls: {} | Tools: {} | Elapsed: {:.1f} ms\n",
+            metrics.status, metrics.llm_calls, metrics.tool_calls, metrics.elapsed_ms);
+        return metrics.status == "completed" ? 0 : 1;
+    } catch (const std::exception& e) {
+        spdlog::error("Agent failed: {}", e.what());
+        return 1;
+    }
 }

@@ -32,10 +32,17 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
 endif()
 
 # ---- Common compiler warnings ----------------------------------------------
-add_compile_options(-Wall -Wextra -Wpedantic)
+if(MSVC)
+    add_compile_options(/W4)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
 # ---- Python 3 + pybind11 ---------------------------------------------------
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+execute_process(COMMAND ${Python3_EXECUTABLE} -m pybind11 --cmakedir
+    OUTPUT_VARIABLE PYBIND11_CMAKE_DIR OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+list(APPEND CMAKE_PREFIX_PATH "${PYBIND11_CMAKE_DIR}")
 find_package(pybind11 REQUIRED)
 
 message(STATUS "Python:   ${Python3_EXECUTABLE} (v${Python3_VERSION})")
@@ -83,6 +90,7 @@ set(CORE_SOURCES
     src/tool/tool_base.cpp
     src/tool/fs_tool.cpp
     src/tool/code_exec_tool.cpp
+    src/tool/process.cpp
     src/tool/grep_tool.cpp
     src/tool/git_tool.cpp
     src/tui/terminal_ui.cpp
@@ -92,6 +100,10 @@ set(CORE_SOURCES
 )
 
 add_library(cpp-agent-core STATIC ${CORE_SOURCES})
+target_compile_definitions(cpp-agent-core PRIVATE
+    CPP_AGENT_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}"
+    CPP_AGENT_PYTHON_SITE="${Python3_SITELIB}"
+    CPP_AGENT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 target_include_directories(cpp-agent-core PUBLIC
     ${CMAKE_SOURCE_DIR}/src

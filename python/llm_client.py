@@ -5,11 +5,19 @@ The C++ runtime calls into this module via pybind11. This file is
 purposefully kept simple — all orchestration logic lives in C++.
 """
 
+import asyncio
+import atexit
+import json
 import os
 import sys
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI, APITimeoutError
+
+if __package__:
+    from .llm_transport import TransportPool, close_all_transports
+else:
+    from llm_transport import TransportPool, close_all_transports
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +76,22 @@ class LLMClient:
         self._base_url = base_url or os.environ.get("OPENAI_BASE_URL")
         self._model = model
         self._client: OpenAI | None = None
+        # Each leased session owns both its event loop and async HTTP client.
+        api_key_value, base_url_value = self._api_key, self._base_url
+        self._transport = TransportPool(lambda: AsyncOpenAI(
+            api_key=api_key_value, base_url=base_url_value, timeout=60.0, max_retries=0),
+            max_sessions=int(os.environ.get('LLM_MAX_SESSIONS', '4')))
+
+    def close(self):
+        self._transport.close()
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            kwargs: dict[str, Any] = {"api_key": self._api_key}
+            kwargs: dict[str, Any] = {"api_key": self._api_key, "timeout": 60.0, "max_retries": 0}
             if self._base_url:
                 kwargs["base_url"] = self._base_url
             self._client = OpenAI(**kwargs)
@@ -113,35 +132,7 @@ class LLMClient:
             kwargs["tools"] = tools
 
         response = self.client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
-        msg = choice.message
-
-        result: dict[str, Any] = {
-            "content": msg.content,
-            "tool_calls": None,
-            "finish_reason": choice.finish_reason,
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-            },
-            "model": response.model,
-        }
-
-        if msg.tool_calls:
-            result["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in msg.tool_calls
-            ]
-
-        return result
+        return _response_to_dict(response)
 
     def chat_streaming(
         self,
@@ -186,6 +177,76 @@ class LLMClient:
                     }
 
 
+
+def _response_to_dict(response):
+    choice = response.choices[0]
+    msg = choice.message
+
+    result: dict[str, Any] = {
+        "content": msg.content,
+        "tool_calls": None,
+        "finish_reason": choice.finish_reason,
+        "usage": {
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "total_tokens": response.usage.total_tokens if response.usage else 0,
+        } if response.usage else None,
+        "model": response.model,
+    }
+
+    if msg.tool_calls:
+        result["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                },
+            }
+            for tc in msg.tool_calls
+        ]
+
+    return result
+
+
+def _request(client, messages, tools, timeout_ms=0, on_chunk=None, *, model=None):
+    """Own the HTTP request and cancel/close it before returning on timeout.
+
+    A positive timeout is a total request deadline, including streaming. Zero
+    disables that total deadline; the SDK still has a 60s IO timeout.
+    """
+    max_output_tokens = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "4096"))
+    if not 1 <= max_output_tokens <= 4096:
+        raise ValueError("LLM_MAX_OUTPUT_TOKENS must be between 1 and 4096")
+    thinking_mode = os.environ.get("LLM_THINKING_MODE", "")
+    if thinking_mode not in ("", "enabled", "disabled"):
+        raise ValueError("LLM_THINKING_MODE must be enabled or disabled")
+    # Snapshot per-request options before any wait. Concurrent agents must not
+    # communicate their model choice by mutating the shared default client.
+    kwargs = dict(model=model or client._model, messages=messages,
+                  temperature=0.2, max_tokens=max_output_tokens)
+    if thinking_mode:
+        kwargs["extra_body"] = {"thinking": {"type": thinking_mode}}
+    if tools:
+        kwargs["tools"] = tools
+
+    async def request(transport):
+        if on_chunk is None:
+            return await transport.chat.completions.create(**kwargs)
+        stream = await transport.chat.completions.create(**kwargs, stream=True,
+            stream_options={"include_usage": True})
+        try:
+            async for chunk in stream:
+                on_chunk(chunk)
+        finally:
+            await stream.close()
+
+    try:
+        return client._transport.run(request, timeout_ms)
+    except APITimeoutError as exc:
+        raise TimeoutError("LLM HTTP timeout") from exc
+
 # ---------------------------------------------------------------------------
 # Module-level convenience functions (called from C++ via pybind11)
 # ---------------------------------------------------------------------------
@@ -198,6 +259,18 @@ def _get_client() -> LLMClient:
     if _default_client is None:
         _default_client = LLMClient()
     return _default_client
+
+
+def shutdown_llm_clients():
+    """Call after agent workers have joined, before Python finalization."""
+    global _default_client
+    close_all_transports()
+    if _default_client is not None:
+        _default_client.close()
+        _default_client = None
+
+
+atexit.register(shutdown_llm_clients)
 
 
 def call_llm(
@@ -218,21 +291,15 @@ def call_llm(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    client = _get_client()
-    client._model = model  # allow override per-call
-    result = client.chat(messages)
+    result = json.loads(call_llm_messages(json.dumps(messages), model=model))
     return result.get("content", "")
 
 
 def call_llm_streaming(prompt: str, *, model: str = DEFAULT_MODEL) -> str:
     """Streaming variant — accumulates and returns full response."""
     messages = [{"role": "user", "content": prompt}]
-    client = _get_client()
-    client._model = model
     parts: list[str] = []
-    for token in client.chat_streaming(messages):
-        if token["type"] == "content":
-            parts.append(token["data"])
+    call_llm_messages_streaming(json.dumps(messages), model=model, on_token=parts.append)
     return "".join(parts)
 
 
@@ -245,6 +312,7 @@ def call_llm_messages(
     tools_json: str = "[]",
     *,
     model: str = DEFAULT_MODEL,
+    timeout_ms: int = 0,
 ) -> str:
     """
     Full agent LLM call. Takes JSON-encoded messages and tools, returns
@@ -275,8 +343,7 @@ def call_llm_messages(
         })
 
     client = _get_client()
-    client._model = model
-    result = client.chat(messages, tools)
+    result = _response_to_dict(_request(client, messages, tools, timeout_ms, model=model))
     return json.dumps(result)
 
 
@@ -291,6 +358,7 @@ def call_llm_messages_streaming(
     model: str = DEFAULT_MODEL,
     on_token: "typing.Callable[[str], None] | None" = None,
     on_complete: "typing.Callable[[str], None] | None" = None,
+    timeout_ms: int = 0,
 ) -> None:
     """
     Streaming variant that calls on_token(content) for each text delta.
@@ -318,31 +386,35 @@ def call_llm_messages_streaming(
         return
 
     client = _get_client()
-    client._model = model
 
     full_content: list[str] = []
+    usage = None
+    finish_reason = None
     tool_call_buf: dict[int, dict[str, str]] = {}  # Day 19: accumulate tool_call deltas
-    stream = client.chat_streaming(messages, tools)
-
-    for chunk in stream:
-        if chunk["type"] == "content":
-            delta = chunk["data"]
-            full_content.append(delta)
+    def process_chunk(chunk):
+        nonlocal usage, finish_reason
+        if getattr(chunk, "usage", None) is not None:
+            usage = {key: getattr(chunk.usage, key, 0) for key in
+                     ("prompt_tokens", "completion_tokens", "total_tokens")}
+        if chunk.choices and chunk.choices[0].finish_reason:
+            finish_reason = chunk.choices[0].finish_reason
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta is None:
+            return
+        if delta.content:
+            full_content.append(delta.content)
             if on_token:
-                on_token(delta)
-        elif chunk["type"] == "tool_call":
-            # Day 19: OpenAI streams tool calls incrementally — id/name arrive
-            # on the first delta, arguments are split across chunks. Accumulate
-            # by index so the final response matches the non-streaming shape.
-            data = chunk["data"]
-            idx = data["index"]
-            buf = tool_call_buf.setdefault(idx, {"id": "", "function_name": "", "arguments": ""})
-            if data.get("id"):
-                buf["id"] = data["id"]
-            if data.get("function_name"):
-                buf["function_name"] = data["function_name"]
-            if data.get("arguments"):
-                buf["arguments"] += data["arguments"]
+                on_token(delta.content)
+        for tc in delta.tool_calls or []:
+            buf = tool_call_buf.setdefault(tc.index, {"id": "", "function_name": "", "arguments": ""})
+            if tc.id:
+                buf["id"] = tc.id
+            if tc.function and tc.function.name:
+                buf["function_name"] = tc.function.name
+            if tc.function and tc.function.arguments:
+                buf["arguments"] += tc.function.arguments
+
+    _request(client, messages, tools, timeout_ms, process_chunk, model=model)
 
     # Day 19: assemble accumulated tool calls into the same shape as chat().
     tool_calls = None
@@ -360,8 +432,8 @@ def call_llm_messages_streaming(
     final = {
         "content": "".join(full_content),
         "tool_calls": tool_calls,
-        "finish_reason": "tool_calls" if tool_calls else "stop",
-        "usage": {"prompt_tokens": 0, "completion_tokens": len(full_content), "total_tokens": 0},
+        "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
+        "usage": usage,
         "model": model,
     }
     if on_complete:

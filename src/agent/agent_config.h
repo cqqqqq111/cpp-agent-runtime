@@ -28,8 +28,8 @@ struct AgentConfig {
     float temperature = 0.2f;
 
     /// Day 22: per-iteration timeout for a single LLM call (milliseconds).
-    /// 0 = block indefinitely (no timeout). When exceeded, the loop aborts
-    /// gracefully instead of hanging on a stuck LLM call.
+    /// Enforced by the LLM adapter/transport; unsupported adapters reject it.
+    /// 0 disables the total deadline (transport IO timeouts may still apply).
     int iteration_timeout_ms = 0;
 };
 

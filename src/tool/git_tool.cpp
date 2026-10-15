@@ -1,4 +1,5 @@
 #include "tool/git_tool.h"
+#include "tool/process.h"
 
 #include <spdlog/spdlog.h>
 
@@ -9,23 +10,6 @@
 #include <stdexcept>
 
 namespace cpp_agent {
-
-// ============================================================================
-// Helper: run a command and capture output
-// ============================================================================
-static std::string capture_command(const std::string& cmd) {
-    struct PipeCloser { void operator()(FILE* f) const { if (f) _pclose(f); } };
-    std::unique_ptr<FILE, PipeCloser> pipe(_popen(cmd.c_str(), "r"));
-    if (!pipe) return "(error: popen failed)";
-
-    std::ostringstream out;
-    std::array<char, 4096> buf{};
-    while (std::fgets(buf.data(), static_cast<int>(buf.size()), pipe.get())) {
-        out << buf.data();
-    }
-    std::string result = out.str();
-    return result.empty() ? "(no output)" : result;
-}
 
 // ============================================================================
 // GitTool
@@ -58,34 +42,35 @@ ToolResult GitTool::execute(const json& args, const std::string& call_id) {
 
     std::string action = args.value("action", "");
 
+    std::vector<std::string> command{"git", "-C", repo_root_.string()};
     if (action == "status") {
-        tr.content = run_git("status --short");
-        tr.success = true;
+        command.insert(command.end(), {"status", "--short"});
     } else if (action == "diff") {
-        tr.content = run_git("diff");
-        tr.success = true;
+        command.push_back("diff");
     } else if (action == "log") {
         int count = args.value("count", 10);
-        tr.content = run_git("log --oneline -" + std::to_string(count));
-        tr.success = true;
+        if (count < 1 || count > 1000) {
+            tr.content = "Error: count must be between 1 and 1000.";
+            tr.success = false;
+            return tr;
+        }
+        command.insert(command.end(), {"log", "--oneline", "-n", std::to_string(count)});
     } else {
-        tr.content = "Error: unknown action '" + action +
-                     "'. Use 'status', 'diff', or 'log'.";
+        tr.content = "Error: unknown action '" + action + "'. Use 'status', 'diff', or 'log'.";
+        tr.success = false;
+        return tr;
+    }
+    try {
+        auto result = run_process(command, std::chrono::seconds(10), 1024 * 1024);
+        tr.content = result.describe();
+        tr.success = result.success();
+    } catch (const std::exception& e) {
+        tr.content = std::string("git error: ") + e.what();
         tr.success = false;
     }
 
     spdlog::debug("GitTool: {} → {} chars", action, tr.content.size());
     return tr;
-}
-
-std::string GitTool::run_git(const std::string& subcommand) {
-    std::string cmd = "cd /d \"" + repo_root_.string() +
-                      "\" && git " + subcommand + " 2>&1";
-    try {
-        return capture_command(cmd);
-    } catch (const std::exception& e) {
-        return std::string("git error: ") + e.what();
-    }
 }
 
 }  // namespace cpp_agent

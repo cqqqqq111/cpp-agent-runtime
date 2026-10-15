@@ -74,10 +74,13 @@ static bool test_code_exec_timeout() {
     // Python infinite loop — should be killed after 1s
     json args = {{"language", "python"},
                  {"code", "import time; time.sleep(10); print('never')"}};
+    auto started = std::chrono::steady_clock::now();
     auto result = tool.execute(args, "call_3");
 
     // The result should mention timeout
     assert(result.content.find("timeout") != std::string::npos);
+    assert(!result.success);
+    assert(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
     return true;
 }
 
@@ -90,6 +93,7 @@ static bool test_code_exec_error() {
     // Python prints ZeroDivisionError traceback to stderr
     // which is redirected to stdout via 2>&1
     assert(!result.content.empty());
+    assert(!result.success);
     return true;
 }
 

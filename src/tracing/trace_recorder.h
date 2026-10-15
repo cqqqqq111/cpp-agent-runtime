@@ -79,6 +79,8 @@ private:
     double elapsed_ms_ = 0.0;
     std::chrono::system_clock::time_point start_time_;
     bool finalized_ = false;
+    uint64_t active_run_id_ = 0;
+    std::optional<RunMetrics> metrics_;
 
     /// Generate a timestamp-based filename if none was provided.
     static std::string generate_filename();

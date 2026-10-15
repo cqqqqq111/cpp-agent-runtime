@@ -1,4 +1,5 @@
 #include "tool/grep_tool.h"
+#include "tool/path_guard.h"
 
 #include <spdlog/spdlog.h>
 
@@ -8,7 +9,7 @@
 
 namespace cpp_agent {
 
-GrepTool::GrepTool(fs::path root) : root_(std::move(root)) {}
+GrepTool::GrepTool(fs::path root) : root_(fs::weakly_canonical(fs::absolute(root))) {}
 
 json GrepTool::parameters_schema() const {
     return {
@@ -76,6 +77,13 @@ ToolResult GrepTool::execute(const json& args, const std::string& call_id) {
         search_path = up.is_absolute() ? up : root_ / up;
     }
 
+    auto checked_path = resolve_in_root(root_, search_path);
+    if (!checked_path) {
+        tr.content = "Error: path is outside the allowed directory or is invalid.";
+        tr.success = false;
+        return tr;
+    }
+    search_path = *checked_path;
     if (!fs::exists(search_path)) {
         tr.content = fmt::format("Error: path not found: {}", search_path.string());
         tr.success = false;
@@ -95,10 +103,12 @@ ToolResult GrepTool::execute(const json& args, const std::string& call_id) {
 
     auto search_file = [&](const fs::path& fp) {
         if (total_matches >= kMaxMatches) return;
+        auto checked = resolve_in_root(root_, fp);
+        if (!checked) return;
         if (!fs::is_regular_file(fp)) return;
         if (fs::file_size(fp) > 5 * 1024 * 1024) return;  // skip > 5MB
 
-        std::ifstream file(fp);
+        std::ifstream file(*checked);
         if (!file) return;
 
         std::string line;

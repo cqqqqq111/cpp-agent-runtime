@@ -35,7 +35,8 @@ std::string call_llm_streaming_bridge(const std::string& prompt);
 /// Day 4+: Full multi-turn chat with tools.
 /// @returns JSON string of the LLMResponse.
 std::string call_llm_messages_bridge(const std::string& messages_json,
-                                     const std::string& tools_json);
+                                     const std::string& tools_json,
+                                     int timeout_ms = 0, const std::string& model = "");
 
 /// Day 9: Embed text to a vector via Python/OpenAI.
 std::string call_embedding_bridge(const std::string& text);
@@ -47,7 +48,8 @@ void call_llm_streaming_bridge(
     const std::string& messages_json,
     const std::string& tools_json,
     const std::function<void(const std::string&)>& on_token,
-    const std::function<void(const std::string&)>& on_complete);
+    const std::function<void(const std::string&)>& on_complete,
+    int timeout_ms = 0, const std::string& model = "");
 
 /// Day 17: Report whether an LLM is configured and the active model.
 /// The .env file is loaded on the Python side, so C++ asks Python instead of

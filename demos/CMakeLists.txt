@@ -8,6 +8,12 @@
 #   refactor_demo     — grep references + read_file → migration plan
 
 set(DEMO_COMMON ${CMAKE_CURRENT_SOURCE_DIR}/demo_common.h)
+add_executable(performance_demo performance_demo.cpp)
+target_include_directories(performance_demo PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(performance_demo PRIVATE cpp-agent-core)
+
+add_executable(context_size_demo context_size_demo.cpp)
+target_link_libraries(context_size_demo PRIVATE cpp-agent-core)
 
 # --- Code review scenario ---
 add_executable(code_review_demo code_review_demo.cpp)

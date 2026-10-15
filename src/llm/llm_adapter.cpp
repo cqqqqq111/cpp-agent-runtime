@@ -23,6 +23,7 @@ json LLMResponse::to_json() const {
     j["total_tokens"] = total_tokens;
     j["model"] = model;
     j["finish_reason"] = finish_reason;
+    j["usage_available"] = usage_available;
 
     json tcs = json::array();
     for (const auto& tc : tool_calls) {
@@ -41,6 +42,11 @@ class PythonLLMAdapter : public LLMAdapter {
 public:
     explicit PythonLLMAdapter(std::string model)
         : model_(std::move(model)) {}
+
+    void set_request_timeout(int milliseconds) override {
+        if (milliseconds < 0) throw std::invalid_argument("Negative LLM timeout");
+        timeout_ms_ = milliseconds;
+    }
 
     // ---- Day 1 compat -------------------------------------------------------
     LLMResponse chat(
@@ -62,6 +68,7 @@ public:
     ) override {
         // Serialize messages to JSON array
         json msgs_json = json::array();
+        msgs_json.get_ref<json::array_t&>().reserve(messages.size());
         for (const auto& m : messages) {
             msgs_json.push_back(m.to_json());
         }
@@ -72,35 +79,21 @@ public:
         spdlog::debug("chat_full: {} messages, tools_count={}",
                       messages.size(), tools.is_array() ? tools.size() : 0);
 
-        // Call the bridge with retry on transient failures.
-        // Day 5: simple retry loop (max 3 attempts, linear backoff).
-        // Day 11+: exponential backoff with jitter.
-        constexpr int kMaxRetries = 3;
-        std::string raw;
-        for (int attempt = 0; attempt <= kMaxRetries; ++attempt) {
-            try {
-                raw = call_llm_messages_bridge(msgs_str, tools_str);
-                break;  // success
-            } catch (const std::exception& e) {
-                if (attempt == kMaxRetries) {
-                    spdlog::error("LLM call failed after {} retries: {}", kMaxRetries, e.what());
-                    throw;  // rethrow after all retries exhausted
-                }
-                spdlog::warn("LLM call attempt {}/{} failed: {}. Retrying in {}s...",
-                            attempt + 1, kMaxRetries + 1, e.what(), attempt + 1);
-                std::this_thread::sleep_for(std::chrono::seconds(attempt + 1));
-            }
-        }
+        // The transport owns cancellation and the total deadline; retries must
+        // not silently multiply that deadline or retry permanent errors.
+        std::string raw = call_llm_messages_bridge(msgs_str, tools_str, timeout_ms_, model_);
 
         // Parse JSON response
         json resp = json::parse(raw);
+        if (resp.contains("_error")) throw std::runtime_error(resp.at("_error").get<std::string>());
 
         LLMResponse result;
-        result.content = resp.value("content", "");
+        result.content = resp.value("content", json()).is_null() ? "" : resp.at("content").get<std::string>();
         result.finish_reason = resp.value("finish_reason", "stop");
         result.model = resp.value("model", model_);
 
         if (resp.contains("usage") && !resp["usage"].is_null()) {
+            result.usage_available = true;
             result.prompt_tokens = resp["usage"].value("prompt_tokens", 0);
             result.completion_tokens = resp["usage"].value("completion_tokens", 0);
             result.total_tokens = resp["usage"].value("total_tokens", 0);
@@ -128,6 +121,7 @@ public:
         const std::function<void(LLMResponse)>& on_complete
     ) override {
         json msgs_json = json::array();
+        msgs_json.get_ref<json::array_t&>().reserve(messages.size());
         for (const auto& m : messages) msgs_json.push_back(m.to_json());
 
         std::string msgs_str = msgs_json.dump();
@@ -139,11 +133,13 @@ public:
         call_llm_streaming_bridge(msgs_str, tools_str, on_token,
             [on_complete, this](const std::string& raw) {
                 json resp = json::parse(raw);
+                if (resp.contains("_error")) throw std::runtime_error(resp.at("_error").get<std::string>());
                 LLMResponse result;
-                result.content = resp.value("content", "");
+                result.content = resp.value("content", json()).is_null() ? "" : resp.at("content").get<std::string>();
                 result.finish_reason = resp.value("finish_reason", "stop");
                 result.model = resp.value("model", model_);
                 if (resp.contains("usage") && !resp["usage"].is_null()) {
+                    result.usage_available = true;
                     result.prompt_tokens = resp["usage"].value("prompt_tokens", 0);
                     result.completion_tokens = resp["usage"].value("completion_tokens", 0);
                     result.total_tokens = resp["usage"].value("total_tokens", 0);
@@ -156,7 +152,7 @@ public:
                     result.has_tool_calls = !result.tool_calls.empty();
                 }
                 on_complete(result);
-            });
+            }, timeout_ms_, model_);
     }
 
     std::string name() const override {
@@ -165,6 +161,7 @@ public:
 
 private:
     std::string model_;
+    int timeout_ms_ = 0;
 };
 
 // ---- Factory ----------------------------------------------------------------

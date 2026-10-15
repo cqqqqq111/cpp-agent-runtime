@@ -3,7 +3,7 @@
  * @brief GitTool — git operations for agent-assisted version control.
  *
  * Supports: status, diff, log.
- * All commands run via popen on the repo root.
+ * Commands use an argument vector, a bounded timeout and captured exit status.
  */
 
 #pragma once
@@ -36,8 +36,6 @@ public:
 private:
     fs::path repo_root_;
 
-    /// Run a git command and capture output.
-    std::string run_git(const std::string& subcommand);
 };
 
 }  // namespace cpp_agent

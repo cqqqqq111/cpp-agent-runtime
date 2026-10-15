@@ -65,11 +65,8 @@ int main(int argc, char* argv[]) {
         "concisely in Chinese. Prefer grep for finding patterns and "
         "filesystem read_file for reading a specific file.";
     cfg.max_iterations = 6;
-    // NOTE: leave iteration_timeout_ms = 0 here. The Python bridge holds the
-    // GIL on the main thread (pybind11 scoped_interpreter), so moving the LLM
-    // call onto a timeout worker std::thread deadlocks on GIL acquisition.
-    // Timeout is enforced at the HTTP layer instead (see python/llm_client.py).
-    cfg.iteration_timeout_ms = 0;
+    // Total per-request deadline is enforced and cancelled by the Python transport.
+    cfg.iteration_timeout_ms = 60000;
 
     auto llm = make_python_llm_adapter(model);
     fmt::print("LLM backend: {}\n\n", llm->name());

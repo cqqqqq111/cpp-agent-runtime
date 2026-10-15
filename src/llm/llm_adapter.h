@@ -16,10 +16,15 @@
 
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace cpp_agent {
+class LLMTimeout : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 /// Result of a single LLM completion call.
 struct LLMResponse {
@@ -31,6 +36,7 @@ struct LLMResponse {
     int total_tokens = 0;
     std::string model;
     std::string finish_reason;       // "stop", "tool_calls", "length", etc.
+    bool usage_available = false;    // provider supplied usage, not an estimate
 
     /// Serialize to JSON for trace export (Day 16).
     json to_json() const;
@@ -43,6 +49,13 @@ using TokenCallback = std::function<void(const std::string& token)>;
 class LLMAdapter {
 public:
     virtual ~LLMAdapter() = default;
+
+    // A deadline must be enforced by the transport/adapter, which owns the
+    // request. Never detach a thread that borrows this adapter or its callbacks.
+    virtual void set_request_timeout(int milliseconds) {
+        if (milliseconds != 0)
+            throw std::invalid_argument("LLM adapter does not support request timeouts");
+    }
 
     /// Day 1 backwards-compat simple call (kept for main.cpp smoke test).
     virtual LLMResponse chat(

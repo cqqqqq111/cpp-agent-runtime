@@ -72,6 +72,7 @@ ToolResult ToolRegistry::execute(const std::string& name, const json& args,
 
 json ToolRegistry::to_openai_tools() const {
     json tools = json::array();
+    tools.get_ref<json::array_t&>().reserve(tools_.size());
     for (const auto& [_, tool] : tools_) {
         tools.push_back(tool->definition().to_openai_function());
     }

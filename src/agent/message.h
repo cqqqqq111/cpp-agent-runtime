@@ -102,12 +102,12 @@ struct Message {
         return m;
     }
     static Message tool_result(const std::string& call_id, const std::string& tool_name,
-                               const std::string& output) {
+                               std::string output) {
         Message m;
         m.role = MessageRole::TOOL;
         m.tool_call_id = call_id;
         m.name = tool_name;
-        m.content = output;
+        m.content = std::move(output);
         return m;
     }
 

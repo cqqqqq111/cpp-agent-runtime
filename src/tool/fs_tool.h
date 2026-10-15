@@ -58,7 +58,8 @@ private:
     std::optional<fs::path> validate_path(const std::string& user_path) const;
 
     // ---- Action implementations ---------------------------------------------
-    ToolResult do_read_file(const fs::path& path, const std::string& call_id);
+    ToolResult do_read_file(const fs::path& path, const std::string& call_id,
+                           int start_line, int end_line);
     ToolResult do_list_dir(const fs::path& path, const std::string& call_id);
     ToolResult do_search_content(const fs::path& path, const std::string& pattern,
                                  const std::string& call_id);

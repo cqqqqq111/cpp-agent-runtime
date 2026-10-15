@@ -115,6 +115,24 @@ TraceRecorder::TraceRecorder(std::string output_path)
 }
 
 void TraceRecorder::record(const TraceStep& step) {
+    if (step.run_id && step.run_id != active_run_id_) {
+        // One trace is one run, even when the recorder is reused by the TUI.
+        steps_.clear();
+        metrics_.reset();
+        finalized_ = false;
+        final_answer_.clear();
+        elapsed_ms_ = 0;
+        active_run_id_ = step.run_id;
+    }
+    if (step.phase == TraceStep::Phase::FINISH) {
+        metrics_ = step.run_metrics;
+        if (metrics_) {
+            elapsed_ms_ = metrics_->elapsed_ms;
+            final_answer_ = step.llm_content;
+            finalized_ = true;
+        }
+        return;
+    }
     steps_.push_back(step);
 }
 
@@ -124,6 +142,12 @@ ReActLoop::TraceCallback TraceRecorder::wrap(ReActLoop::TraceCallback existing) 
     // is invoked during agent.run() which is called within main()'s scope.
     return [this, cb = std::move(existing)](const TraceStep& step) {
         this->record(step);
+        if (step.phase == TraceStep::Phase::FINISH) {
+            // Preserve diagnostic traces even when run() rethrows an exception
+            // and the caller never reaches its normal save_to_file().
+            if (step.run_metrics && step.run_metrics->status == "error") save_to_file();
+            return;
+        }
         if (cb) cb(step);
     };
 }
@@ -134,6 +158,7 @@ void TraceRecorder::set_config(const AgentConfig& config) {
 
 void TraceRecorder::set_query(const std::string& query) {
     query_ = query;
+    start_time_ = std::chrono::system_clock::now();
 }
 
 void TraceRecorder::finalize(size_t total_llm_calls, size_t total_tokens,
@@ -150,7 +175,7 @@ void TraceRecorder::finalize(size_t total_llm_calls, size_t total_tokens,
 json TraceRecorder::to_json() const {
     json j;
 
-    j["version"] = "1.0.0";
+    j["version"] = "1.1.0";
     j["generated_by"] = "cpp-agent-runtime 0.1.0";
     j["exported_at"] = time_point_to_iso(std::chrono::system_clock::now());
 
@@ -187,6 +212,10 @@ json TraceRecorder::to_json() const {
         {"elapsed_ms", elapsed_ms_},
         {"final_answer", final_answer_}
     };
+    if (metrics_) {
+        j["summary"]["performance"] = metrics_->to_json();
+        j["summary"]["elapsed_ms"] = metrics_->elapsed_ms;
+    }
 
     // Steps with per-step elapsed_ms
     json steps_arr = json::array();
@@ -197,7 +226,7 @@ json TraceRecorder::to_json() const {
             sj["index"] = i;
             auto elapsed = std::chrono::duration<double, std::milli>(
                 steps_[i].timestamp - first_ts).count();
-            sj["elapsed_ms"] = elapsed;
+            sj["elapsed_ms"] = steps_[i].elapsed_ms.value_or(elapsed);
             steps_arr.push_back(sj);
         }
     }

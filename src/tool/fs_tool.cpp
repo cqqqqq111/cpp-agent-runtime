@@ -1,9 +1,11 @@
 #include "tool/fs_tool.h"
+#include "tool/path_guard.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -14,7 +16,7 @@ namespace cpp_agent {
 // ============================================================================
 
 FileSystemTool::FileSystemTool(fs::path allowed_root)
-    : allowed_root_(fs::absolute(allowed_root).lexically_normal()) {
+    : allowed_root_(fs::weakly_canonical(fs::absolute(allowed_root))) {
     spdlog::info("FileSystemTool: allowed_root = {}", allowed_root_.string());
 }
 
@@ -38,6 +40,14 @@ json FileSystemTool::parameters_schema() const {
             {"pattern", {
                 {"type", "string"},
                 {"description", "Regex pattern for search_content action."}
+            }},
+            {"start_line", {
+                {"type", "integer"}, {"minimum", 1},
+                {"description", "read_file: first line, inclusive; default 1."}
+            }},
+            {"end_line", {
+                {"type", "integer"}, {"minimum", 1},
+                {"description", "read_file: last line, inclusive; omitted means EOF."}
             }}
         }},
         {"required", json::array({"action"})}
@@ -63,7 +73,15 @@ ToolResult FileSystemTool::execute(const json& args, const std::string& call_id)
 
     // Dispatch
     if (action == "read_file") {
-        return do_read_file(*resolved, call_id);
+        for (const auto* field : {"start_line", "end_line"}) {
+            if (args.contains(field) && (!args[field].is_number_integer() ||
+                args[field] < 1 || args[field] > std::numeric_limits<int>::max()))
+                return {call_id, name(), "Error: line numbers must be positive integers.", false};
+        }
+        int start = args.value("start_line", 1);
+        int end = args.value("end_line", std::numeric_limits<int>::max());
+        if (end < start) return {call_id, name(), "Error: end_line must be >= start_line.", false};
+        return do_read_file(*resolved, call_id, start, end);
     } else if (action == "list_dir") {
         return do_list_dir(*resolved, call_id);
     } else if (action == "search_content") {
@@ -145,7 +163,7 @@ std::string human_readable_size(uintmax_t bytes) {
 // ============================================================================
 
 ToolResult FileSystemTool::do_read_file(const fs::path& path,
-                                         const std::string& call_id) {
+                                         const std::string& call_id, int start_line, int end_line) {
     ToolResult tr;
     tr.tool_call_id = call_id;
     tr.name = name();
@@ -181,14 +199,20 @@ ToolResult FileSystemTool::do_read_file(const fs::path& path,
     std::ostringstream out;
     out << "File: " << path.filename().string() << " (" << fsize << " bytes)\n";
     out << std::string(60, '-') << "\n";
+    if (start_line > 1 || end_line != std::numeric_limits<int>::max())
+        out << "Selected lines: " << start_line << ".."
+            << (end_line == std::numeric_limits<int>::max() ? "EOF" : std::to_string(end_line)) << "\n";
 
     std::string line;
     int line_no = 0;
-    while (std::getline(file, line)) {
+    while (line_no < end_line && std::getline(file, line)) {
         ++line_no;
+        if (line_no < start_line) continue;
         out << fmt::format("{:4d} │ {}\n", line_no, line);
     }
 
+    if (start_line > 1 && start_line > line_no)
+        return {call_id, name(), "Error: start_line is past end of file.", false};
     tr.content = out.str();
     tr.success = true;
 
@@ -303,10 +327,12 @@ ToolResult FileSystemTool::do_search_content(const fs::path& path,
     // Helper: search one file
     auto search_file = [&](const fs::path& fp) {
         if (total_matches >= kMaxMatches) return;
+        auto checked = resolve_in_root(allowed_root_, fp);
+        if (!checked) return;
         if (!fs::is_regular_file(fp)) return;
         if (fs::file_size(fp) > kMaxFileSize) return;
 
-        std::ifstream file(fp);
+        std::ifstream file(*checked);
         if (!file) return;
 
         std::string line;

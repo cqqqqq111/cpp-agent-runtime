@@ -3,10 +3,10 @@
  * @brief CodeExecTool — execute Python/shell commands in a subprocess.
  *
  * Security model:
- *   - Child process runs isolated from the agent process
+ *   - Child is a separate process, NOT a security sandbox
  *   - Configurable timeout (default 5s) prevents runaway execution
  *   - Output capped at 10KB to avoid memory blowup
- *   - Only stdout is captured; stderr goes to agent logs
+ *   - stdout and stderr are captured; exit status is propagated
  */
 
 #pragma once
@@ -39,8 +39,6 @@ private:
     std::chrono::seconds timeout_;
     size_t max_output_bytes_;
 
-    /// Run a command via popen and capture output with timeout.
-    std::string run_command(const std::string& cmd);
 };
 
 }  // namespace cpp_agent

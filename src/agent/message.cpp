@@ -150,6 +150,12 @@ size_t MessageHistory::truncate_to(size_t max_tokens) {
         total_tokens_ -= messages_.front().estimated_tokens();
         messages_.pop_front();
         ++removed;
+        // Never retain orphan tool results after removing their assistant call.
+        while (!messages_.empty() && messages_.front().is_tool_result()) {
+            total_tokens_ -= messages_.front().estimated_tokens();
+            messages_.pop_front();
+            ++removed;
+        }
     }
 
     return removed;

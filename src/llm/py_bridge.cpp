@@ -20,6 +20,7 @@
  */
 
 #include "llm/py_bridge.h"
+#include "llm/llm_adapter.h"
 
 #include <pybind11/embed.h>
 #include <pybind11/stl.h>
@@ -43,6 +44,8 @@ namespace {
 
 /// Guard that owns the interpreter lifecycle.
 std::unique_ptr<py::scoped_interpreter> g_interpreter = nullptr;
+// Release the initialization thread's GIL so TUI worker threads can call Python.
+std::unique_ptr<py::gil_scoped_release> g_gil_release;
 
 /// Cached callable — avoids repeated module lookups.
 py::object g_call_llm = {};
@@ -51,9 +54,11 @@ py::object g_call_llm_messages = {};  // Day 4: multi-turn + tools
 py::object g_call_embedding = {};      // Day 9: text → vector
 py::object g_call_streaming_msgs = {}; // Day 11: streaming multi-turn
 py::object g_llm_config = {};          // Day 17: config status
+py::object g_shutdown_clients = {};
 
 /// Have we successfully initialized?
 bool g_initialized = false;
+bool g_finalized = false;
 
 }  // namespace
 
@@ -62,6 +67,12 @@ bool g_initialized = false;
 // ---------------------------------------------------------------------------
 
 int init_python_bridge() {
+    // Native SDK dependencies need a process-lifetime interpreter. Reject a
+    // second initialization instead of reentering extensions after finalization.
+    if (g_finalized) {
+        spdlog::error("Python bridge cannot be restarted after shutdown; start a new process.");
+        return -1;
+    }
     if (g_initialized) {
         spdlog::warn("init_python_bridge: already initialized, skipping.");
         return 0;
@@ -78,6 +89,10 @@ int init_python_bridge() {
         // our llm_client module regardless of CWD.
         py::module_ sys = py::module_::import("sys");
         py::list path = sys.attr("path");
+        path.attr("insert")(0, CPP_AGENT_SOURCE_DIR);
+        // The embedded interpreter does not automatically use the build venv.
+        py::module_ site = py::module_::import("site");
+        site.attr("addsitedir")(CPP_AGENT_PYTHON_SITE);
 
         // Try build directory first, then source directory as fallback
         path.attr("insert")(0, "./python");
@@ -91,24 +106,36 @@ int init_python_bridge() {
         g_call_embedding = llm.attr("call_embedding");
         g_call_streaming_msgs = llm.attr("call_llm_messages_streaming");
         g_llm_config = llm.attr("llm_config");
+        g_shutdown_clients = llm.attr("shutdown_llm_clients");
 
+        // Release only after local py::object instances above leave scope.
         g_initialized = true;
         spdlog::info("Python bridge initialized (found python.llm_client).");
-        return 0;
+        // The release is installed below, after initialization locals are destroyed.
 
     } catch (const py::error_already_set& e) {
         spdlog::critical("Python bridge init failed: {}", e.what());
-        return 1;
     } catch (const std::exception& e) {
         spdlog::critical("Python bridge init failed: {}", e.what());
-        return 1;
     }
+    if (!g_initialized) { shutdown_python_bridge(); return 1; }
+    g_gil_release = std::make_unique<py::gil_scoped_release>();
+    return 0;
 }
 
 void shutdown_python_bridge() {
-    if (!g_initialized) return;
+    if (!g_interpreter) return;
 
     spdlog::debug("Shutting down Python bridge...");
+    g_gil_release.reset();
+
+    // Client sockets and event loops must close while Python is still alive.
+    // Callers join agent threads before shutting down the interpreter.
+    try {
+        if (g_shutdown_clients) g_shutdown_clients();
+    } catch (const py::error_already_set& e) {
+        spdlog::error("LLM transport shutdown failed: {}", e.what());
+    }
 
     // Release Python object handles before destroying the interpreter.
     g_call_llm = {};
@@ -117,10 +144,12 @@ void shutdown_python_bridge() {
     g_call_embedding = {};
     g_call_streaming_msgs = {};
     g_llm_config = {};
+    g_shutdown_clients = {};
 
     // Destroy the interpreter.
     g_interpreter.reset();
     g_initialized = false;
+    g_finalized = true;
 
     spdlog::info("Python bridge shut down.");
 }
@@ -129,18 +158,6 @@ std::string call_llm_bridge(const std::string& prompt) {
     if (!g_initialized) {
         throw std::runtime_error(
             "Python bridge not initialized. Call init_python_bridge() first.");
-    }
-
-    try {
-        // Release the GIL during the network call (non-blocking for other threads
-        // that might need Python).
-        py::gil_scoped_release release;
-        // Wait — we need the GIL to CALL the function. Let pybind11 manage it.
-        // Actually, since gil_scoped_release releases the GIL, we need to
-        // re-acquire before calling Python. The pattern is: release GIL,
-        // do C++ work (none here), re-acquire, call Python.
-    } catch (...) {
-        // scope guard: gil_scoped_release destructor re-acquires GIL
     }
 
     try {
@@ -175,7 +192,8 @@ std::string call_llm_streaming_bridge(const std::string& prompt) {
 }
 
 std::string call_llm_messages_bridge(const std::string& messages_json,
-                                     const std::string& tools_json) {
+                                     const std::string& tools_json,
+                                     int timeout_ms, const std::string& model) {
     if (!g_initialized) {
         throw std::runtime_error(
             "Python bridge not initialized. Call init_python_bridge() first.");
@@ -183,10 +201,15 @@ std::string call_llm_messages_bridge(const std::string& messages_json,
 
     try {
         py::gil_scoped_acquire gil;
-        py::object result = g_call_llm_messages(messages_json, tools_json);
+        py::dict kwargs;
+        kwargs["timeout_ms"] = timeout_ms;
+        if (!model.empty()) kwargs["model"] = model;
+        py::object result = g_call_llm_messages(messages_json, tools_json, **kwargs);
         return result.cast<std::string>();
 
     } catch (const py::error_already_set& e) {
+        py::gil_scoped_acquire gil;
+        if (e.matches(PyExc_TimeoutError)) throw cpp_agent::LLMTimeout("LLM request timeout");
         std::string msg = std::string("Python multi-turn LLM call failed: ") + e.what();
         spdlog::error("{}", msg);
         throw std::runtime_error(msg);
@@ -220,7 +243,8 @@ void call_llm_streaming_bridge(
     const std::string& messages_json,
     const std::string& tools_json,
     const std::function<void(const std::string&)>& on_token,
-    const std::function<void(const std::string&)>& on_complete) {
+    const std::function<void(const std::string&)>& on_complete,
+    int timeout_ms, const std::string& model) {
     if (!g_initialized) throw std::runtime_error("Python bridge not initialized.");
 
     try {
@@ -230,11 +254,16 @@ void call_llm_streaming_bridge(
         py::cpp_function py_on_complete(
             [on_complete](const std::string& result) { on_complete(result); });
 
+        py::dict kwargs;
+        kwargs["timeout_ms"] = timeout_ms;
+        if (!model.empty()) kwargs["model"] = model;
         g_call_streaming_msgs(
             messages_json, tools_json,
             py::arg("on_token") = py_on_token,
-            py::arg("on_complete") = py_on_complete);
+            py::arg("on_complete") = py_on_complete, **kwargs);
     } catch (const py::error_already_set& e) {
+        py::gil_scoped_acquire gil;
+        if (e.matches(PyExc_TimeoutError)) throw cpp_agent::LLMTimeout("LLM streaming request timeout");
         std::string msg = std::string("Python streaming call failed: ") + e.what();
         spdlog::error("{}", msg);
         throw std::runtime_error(msg);

@@ -150,6 +150,10 @@ public:
     }
 
     LLMResponse chat_full(const std::vector<Message>&, const json&) override {
+        if (timeout_ms_ > 0 && delay_ > std::chrono::milliseconds(timeout_ms_)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms_));
+            throw LLMTimeout("request timeout");
+        }
         std::this_thread::sleep_for(delay_);
         LLMResponse r;
         if (with_tool_) {
@@ -169,10 +173,12 @@ public:
     }
 
     std::string name() const override { return "SlowLLM"; }
+    void set_request_timeout(int milliseconds) override { timeout_ms_ = milliseconds; }
 
 private:
     std::chrono::milliseconds delay_;
     bool with_tool_;
+    int timeout_ms_ = 0;
 };
 
 static bool test_timeout_triggers() {
@@ -184,14 +190,14 @@ static bool test_timeout_triggers() {
     config.iteration_timeout_ms = 40;
 
     ReActLoop agent(llm, registry, config);
+    auto started = std::chrono::steady_clock::now();
     std::string result = agent.run("do something slow");
 
     assert(result.find("timeout") != std::string::npos);
     assert(agent.last_run_iterations() == 1);  // aborted during the first call
 
-    // The detached worker keeps sleeping; give it time to finish before the
-    // SlowLLM/ReActLoop go out of scope (see note in react_loop.cpp).
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    assert(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(250));
+    // Destruction is immediate: no detached worker or delayed callback survives.
     return true;
 }
 

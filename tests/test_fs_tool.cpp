@@ -143,11 +143,13 @@ static bool test_path_traversal_blocked() {
     assert(result.content.find("outside") != std::string::npos);
 
     // Also try the Windows variant
+#ifdef _WIN32
     args = {{"action", "list_dir"}, {"path", "..\\..\\..\\Windows"}};
     result = tool.execute(args, "call_7");
 
     assert(!result.success);
     assert(result.content.find("outside") != std::string::npos);
+#endif
 
     return true;
 }
@@ -205,12 +207,36 @@ static bool test_search_no_pattern() {
 // ============================================================================
 // Runner
 // ============================================================================
+static bool test_line_ranges() {
+    TestDir td;
+    FileSystemTool tool(td.root());
+    json args = {{"action", "read_file"}, {"path", "hello.txt"}, {"start_line", 2}, {"end_line", 2}};
+    auto result = tool.execute(args, "range");
+    assert(result.success && result.content.find("   2 │ This is a test file.") != std::string::npos);
+    assert(result.content.find("Hello, world!") == std::string::npos);
+    assert(result.content.find("Line three.") == std::string::npos);
+    args.erase("end_line");
+    assert(tool.execute(args, "tail").content.find("Line three.") != std::string::npos);
+    for (auto bad : {json(0), json(-1), json(1.5), json("2"), json(1ULL << 40)}) {
+        args["start_line"] = bad;
+        assert(!tool.execute(args, "invalid").success);
+    }
+    args["start_line"] = 3; args["end_line"] = 2;
+    assert(!tool.execute(args, "inverted").success);
+    args["start_line"] = 100; args.erase("end_line");
+    assert(!tool.execute(args, "past-eof").success);
+    args["path"] = "../outside.txt";
+    assert(!tool.execute(args, "escape").success);
+    return true;
+}
+
 int main() {
     struct {
         const char* name;
         bool (*fn)();
     } tests[] = {
         {"read_file normal", test_read_file},
+        {"read_file line ranges", test_line_ranges},
         {"read_file not found", test_read_file_not_found},
         {"list_dir", test_list_dir},
         {"search_content", test_search_content},

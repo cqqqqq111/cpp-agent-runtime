@@ -20,6 +20,7 @@
 
 #include "agent/agent_config.h"
 #include "agent/message.h"
+#include "agent/run_metrics.h"
 #include "llm/llm_adapter.h"
 #include "tool/tool_base.h"
 
@@ -37,7 +38,7 @@ class WorkingMemory;  // forward
 // TraceStep — records one iteration of the loop (for debugging / visualization)
 // ============================================================================
 struct TraceStep {
-    enum class Phase { THINK, ACT, OBSERVE };
+    enum class Phase { THINK, ACT, OBSERVE, FINISH };
 
     int iteration = 0;
     Phase phase = Phase::THINK;
@@ -52,6 +53,12 @@ struct TraceStep {
 
     /// Full LLM response metadata (only meaningful during THINK phase).
     std::optional<LLMResponse> llm_response;
+    uint64_t run_id = 0;
+    std::optional<double> elapsed_ms; // steady-clock offset from run start
+    std::optional<RequestMetrics> request_metrics;
+    std::vector<ToolMetrics> tool_metrics;
+    std::optional<double> tools_wall_ms;
+    std::optional<RunMetrics> run_metrics; // FINISH, consumed by TraceRecorder
 
     /// Serialize to JSON for trace export.
     json to_json() const;
@@ -101,6 +108,7 @@ public:
 
     /// Total tokens consumed in the last run.
     size_t last_run_tokens() const noexcept { return last_tokens_; }
+    const RunMetrics& last_run_metrics() const noexcept { return metrics_; }
 
 private:
     LLMAdapter& llm_;
@@ -113,6 +121,10 @@ private:
     MessageHistory history_;
     size_t last_iterations_ = 0;
     size_t last_tokens_ = 0;
+    RunMetrics metrics_;
+    std::chrono::steady_clock::time_point run_started_;
+    void emit_trace(TraceStep step);
+    void finish_metrics(const std::string& answer) noexcept;
 
     // ---- Day 18: loop detection state ----
     std::string last_fingerprint_;                  // fingerprint of the previous iteration
@@ -121,10 +133,14 @@ private:
     /// Execute all tool calls from an LLM response, return result messages.
     /// @param out_trace_results  If non-null, populated with ToolResult for tracing.
     std::vector<Message> execute_tools(const std::vector<ToolCall>& calls,
-                                        std::vector<ToolResult>* out_trace_results = nullptr);
+                                        std::vector<ToolResult>* out_trace_results = nullptr,
+                                        std::vector<ToolMetrics>* out_metrics = nullptr);
 
     /// Shared loop body; `streaming` selects chat_full vs chat_full_streaming.
     std::string run_impl(const std::string& user_input,
+                         const std::function<void(const std::string&)>& on_token,
+                         bool streaming);
+    std::string run_body(const std::string& user_input,
                          const std::function<void(const std::string&)>& on_token,
                          bool streaming);
 

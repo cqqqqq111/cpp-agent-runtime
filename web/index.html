@@ -436,6 +436,12 @@ function renderStats(s) {
         ['⏱ Elapsed',      fmtMs(s.elapsed_ms ?? 0),
          `${s.total_steps??0} steps, ${s.total_llm_calls??0} LLM calls`],
     ];
+    if (s.performance) {
+        const p = s.performance;
+        cards.push(['LLM time', fmtMs(p.llm_ms), `${p.llm_calls} requests`]);
+        cards.push(['Tool batch time', fmtMs(p.tools_wall_ms),
+                    `Execution sum: ${fmtMs(p.tool_execution_ms)} · Queue sum: ${fmtMs(p.tool_queue_ms)}`]);
+    }
     document.getElementById('stats').innerHTML = cards.map(([l,v,sub]) =>
         `<div class="stat-card"><div class="label">${l}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`
     ).join('');
@@ -496,7 +502,7 @@ function applyFilters() {
         groups.get(i).push(s);
     }
     let maxMs = 1;
-    for (const s of visible) if ((s.elapsed_ms ?? 0) > maxMs) maxMs = s.elapsed_ms;
+    for (const s of visible) maxMs = Math.max(maxMs, s.duration_ms ?? s.elapsed_ms ?? 0);
 
     let html = '';
     for (let iter = 0; iter <= maxIter; iter++) {
@@ -516,7 +522,7 @@ function applyFilters() {
 function phaseBlockHTML(s, maxMs) {
     const phaseName = s.phase || 'UNKNOWN';
     const phaseLower = phaseName.toLowerCase();
-    const w = Math.max(2, ((s.elapsed_ms ?? 10) / maxMs) * 100);
+    const w = Math.max(2, ((s.duration_ms ?? s.elapsed_ms ?? 10) / maxMs) * 100);
     const label = phaseName === 'THINK'
         ? (s.llm_content || '').substring(0, 30)
         : phaseName === 'ACT'
@@ -524,7 +530,7 @@ function phaseBlockHTML(s, maxMs) {
             : phaseName === 'OBSERVE'
                 ? `${s.tool_results?.length || 0} result(s)`
                 : '';
-    const title = `[${phaseName}] ${s.detail || ''} (${fmtMs(s.elapsed_ms)})`;
+    const title = `[${phaseName}] ${s.detail || ''} (duration ${fmtMs(s.duration_ms ?? s.elapsed_ms)})`;
     const idx = _allSteps.indexOf(s);
     const sel = idx === _currentStep ? ' selected' : '';
     return `<div class="phase-block phase-${phaseLower}${sel}"
@@ -558,11 +564,27 @@ function showDetail(index) {
     let grid = '';
     grid += row('Phase', s.phase);
     grid += row('Iteration', s.iteration);
-    grid += row('Elapsed', fmtMs(s.elapsed_ms));
+    grid += row('Offset from run start', fmtMs(s.elapsed_ms));
+    if (s.duration_ms != null) grid += row('Duration', fmtMs(s.duration_ms));
+    if (s.request_metrics) {
+        const m = s.request_metrics;
+        grid += row('Request status', esc(m.status));
+        grid += row('First streamed text', m.first_text_ms == null ? 'N/A' : fmtMs(m.first_text_ms));
+        grid += row('Input content / tool schema', `${m.input_content_bytes} / ${m.tool_schema_bytes} bytes`);
+        grid += row('Output content', `${m.output_content_bytes} bytes`);
+    }
     grid += row('Detail', s.detail || '');
     document.getElementById('detail-grid').innerHTML = grid;
 
     let extra = '';
+    if (s.tool_metrics?.length) {
+        extra += '<div style="margin-top:12px;font-weight:600">Tool performance</div>';
+        for (const m of s.tool_metrics) {
+            extra += `<div class="code-block">${esc(m.name)} (${esc(m.call_id)})\n` +
+                `Queue: ${fmtMs(m.queue_ms)} · Execution: ${fmtMs(m.execution_ms)}\n` +
+                `Input: ${m.input_bytes} bytes · Output: ${m.output_bytes} bytes</div>`;
+        }
+    }
 
     if (s.llm_content && s.llm_content.trim()) {
         extra += `<div class="code-block">${esc(s.llm_content)}</div>`;
@@ -572,7 +594,9 @@ function showDetail(index) {
         const lr = s.llm_response;
         extra += `<div style="margin-top:12px;font-size:0.85rem;color:var(--color-text2)">`;
         extra += `Model: ${esc(lr.model || '?')} &middot; `;
-        extra += `Tokens: ${lr.prompt_tokens||0} prompt + ${lr.completion_tokens||0} compl = ${lr.total_tokens||0} total &middot; `;
+        extra += lr.usage_available === false
+            ? 'Tokens: not reported &middot; '
+            : `Tokens: ${lr.prompt_tokens||0} prompt + ${lr.completion_tokens||0} compl = ${lr.total_tokens||0} total &middot; `;
         extra += `Finish: ${esc(lr.finish_reason || '?')}`;
         extra += `</div>`;
     }
